@@ -3819,6 +3819,24 @@ JoinTable:
          * }
          *
 	 */
+|    TableRef CrossOpt TableRef "ON" Expression %prec tableRefPriority
+     {
+         $$ = &ast.Join{
+            Left: $1.(ast.ResultSetNode),
+            Right: $3.(ast.ResultSetNode),
+            Tp: ast.CrossJoin,
+            On: &ast.OnCondition{Expr: $5},
+         }
+     }
+|    TableRef JoinType OuterOpt CrossOpt TableRef "ON" Expression %prec tableRefPriority
+     {
+          $$ = &ast.Join{
+             Left: $1.(ast.ResultSetNode),
+             Right: $5.(ast.ResultSetNode),
+             Tp: $2.(ast.JoinType),
+             On: &ast.OnCondition{Expr: $7},
+          }
+     }
 
 JoinType:
 	"LEFT"

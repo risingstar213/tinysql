@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
+	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/parser/model"
@@ -196,16 +197,43 @@ func onAddColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error)
 	switch columnInfo.State {
 	case model.StateNone:
 		// To be filled
+		log.Info("onAddColumn StateNone")
+		columnInfo.State = model.StateDeleteOnly
 		ver, err = updateVersionAndTableInfoWithCheck(t, job, tblInfo, originalState != columnInfo.State)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+		job.SchemaState = model.StateDeleteOnly
 	case model.StateDeleteOnly:
 		// To be filled
+		log.Info("onAddColumn StateDeleteOnly")
+		columnInfo.State = model.StateWriteOnly
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != columnInfo.State)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+		job.SchemaState = model.StateWriteOnly
+
 	case model.StateWriteOnly:
 		// To be filled
+		log.Info("onAddColumn StateWriteOnly")
+		columnInfo.State = model.StateWriteReorganization
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != columnInfo.State)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+		job.SchemaState = model.StateWriteReorganization
 	case model.StateWriteReorganization:
 		// To be filled
+		log.Info("onAddColumn StateWriteReorganization")
+		// Finish the job.
+		adjustColumnInfoInAddColumn(tblInfo, offset)
+		columnInfo.State = model.StatePublic
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != columnInfo.State)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+		job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, tblInfo)
 	default:
 		err = ErrInvalidDDLState.GenWithStackByArgs("column", columnInfo.State)
 	}
@@ -235,6 +263,7 @@ func onAddColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, err error)
  *       - Don't forget to do something, if this is a rolling back add column job.
  */
 func onDropColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) {
+	log.Info("onDropColumn")
 	tblInfo, colInfo, err := checkDropColumn(t, job)
 	if err != nil {
 		return ver, errors.Trace(err)
@@ -246,16 +275,43 @@ func onDropColumn(t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	switch colInfo.State {
 	case model.StatePublic:
 		// To be filled
+		job.SchemaState = model.StateWriteOnly
+		colInfo.State = model.StateWriteOnly
+		adjustColumnInfoInDropColumn(tblInfo, colInfo.Offset)
 		ver, err = updateVersionAndTableInfoWithCheck(t, job, tblInfo, originalState != colInfo.State)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
 	case model.StateWriteOnly:
 		// To be filled
+		job.SchemaState = model.StateDeleteOnly
+		colInfo.State = model.StateDeleteOnly
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != colInfo.State)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
 	case model.StateDeleteOnly:
 		// To be filled
+		job.SchemaState = model.StateDeleteReorganization
+		colInfo.State = model.StateDeleteReorganization
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != colInfo.State)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
 	case model.StateDeleteReorganization:
 		// To be filled
+		colInfo.State = model.StateNone
+		tblInfo.Columns = tblInfo.Columns[:len(tblInfo.Columns)-1]
 		ver, err = updateVersionAndTableInfo(t, job, tblInfo, originalState != colInfo.State)
+		if err != nil {
+			return ver, errors.Trace(err)
+		}
+		// Finish the job.
+		if job.IsRollingback() {
+			job.FinishTableJob(model.JobStateRollbackDone, model.StateNone, ver, tblInfo)
+		} else {
+			job.FinishTableJob(model.JobStateDone, model.StateNone, ver, tblInfo)
+		}
 	default:
 		err = errInvalidDDLJob.GenWithStackByArgs("table", tblInfo.State)
 	}
