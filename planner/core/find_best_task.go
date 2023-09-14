@@ -213,7 +213,49 @@ type candidatePath struct {
 func compareCandidates(lhs, rhs *candidatePath) int {
 	// Project 4-2: your code here
 	// TODO: implement the content according to the header comment.
+	setRes, comparable := compareColumnSet(lhs.columnSet, rhs.columnSet)
+	if !comparable {
+		return 0
+	}
+	matchRes := compareBool(lhs.isMatchProp, rhs.isMatchProp)
+	scanRes := compareBool(lhs.isSingleScan, rhs.isSingleScan)
+
+	sumRes := setRes + matchRes + scanRes
+
+	if setRes >= 0 && scanRes >= 0 && matchRes >= 0 && sumRes > 0 {
+		return 1
+	}
+
+	if setRes <= 0 && scanRes <= 0 && matchRes <= 0 && sumRes < 0 {
+		return -1
+	}
+
 	return 0
+}
+
+func compareColumnSet(lhs, rhs *intsets.Sparse) (int, bool) {
+	lenl := lhs.Len()
+	lenr := rhs.Len()
+
+	if lenl < lenr {
+		return -1, lhs.SubsetOf(rhs)
+	}
+
+	if lenl == lenr {
+		return 0, lhs.SubsetOf(rhs)
+	}
+
+	return 1, rhs.SubsetOf(lhs)
+}
+
+func compareBool(lhs, rhs bool) int {
+	if lhs == rhs {
+		return 0
+	}
+	if lhs == false {
+		return -1
+	}
+	return 1
 }
 
 func (ds *DataSource) getTableCandidate(path *util.AccessPath, prop *property.PhysicalProperty) *candidatePath {
@@ -277,7 +319,21 @@ func (ds *DataSource) skylinePruning(prop *property.PhysicalProperty) []*candida
 		// TODO: Here is the pruning phase. Will prune the access path which is must worse than others.
 		//       You'll need to implement the content in function `compareCandidates`.
 		//       And use it to prune unnecessary paths.
-		candidates = append(candidates, currentCandidate)
+		pruned := false
+		// from back
+		for i := len(candidates) - 1; i >= 0; i-- {
+			if result := compareCandidates(candidates[i], currentCandidate); result == 1 {
+				pruned = true
+				break
+			} else if result == -1 {
+				// pruned this
+				candidates = append(candidates[:i], candidates[i+1:]...)
+			}
+		}
+
+		if !pruned {
+			candidates = append(candidates, currentCandidate)
+		}
 	}
 	return candidates
 }
