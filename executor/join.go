@@ -154,7 +154,38 @@ func (e *HashJoinExec) fetchAndBuildHashTable(ctx context.Context) error {
 	// You'll need to store the hash table in `e.rowContainer`
 	// and you can call `newHashRowContainer` in `executor/hash_table.go` to build it.
 	// In this stage you can only assign value for `e.rowContainer` without changing any value of the `HashJoinExec`.
-	return nil
+
+	// estimate
+	estNum := e.initCap
+
+	innerKeyColIdxs := make([]int, len(e.innerKeys))
+	for i := range e.innerKeys {
+		innerKeyColIdxs[i] = e.innerKeys[i].Index
+	}
+
+	hCtx := &hashContext{
+		allTypes:  retTypes(e.innerSideExec),
+		keyColIdx: innerKeyColIdxs,
+	}
+
+	initList := chunk.NewList(retTypes(e.innerSideExec), e.initCap, e.maxChunkSize)
+
+	e.rowContainer = newHashRowContainer(e.ctx, estNum, hCtx, initList)
+
+	for {
+		innerSideResult := newFirstChunk(e.innerSideExec)
+		err := Next(ctx, e.innerSideExec, innerSideResult)
+		if err != nil {
+			return err
+		}
+		if innerSideResult.NumRows() == 0 {
+			return nil
+		}
+		if err = e.rowContainer.PutChunk(innerSideResult); err != nil {
+			return err
+		}
+	}
+
 }
 
 func (e *HashJoinExec) initializeForOuter() {
@@ -248,8 +279,59 @@ func (e *HashJoinExec) runJoinWorker(workerID uint, outerKeyColIdx []int) {
 	// and put the `joinResult` into the channel `e.joinResultCh`.
 
 	// You may pay attention to:
-	// 
+	//
 	// - e.closeCh, this is a channel tells that the join can be terminated as soon as possible.
+	hCtx := hashContext{
+		allTypes:  retTypes(e.outerSideExec),
+		keyColIdx: outerKeyColIdx,
+	}
+	outerResource := outerChkResource{
+		dest: e.outerResultChs[workerID],
+	}
+
+	selected := make([]bool, 0, chunk.InitialCapacity)
+
+	var joinResult *hashjoinWorkerResult
+
+	for {
+		var outerResult *chunk.Chunk
+		var isOk bool
+		select {
+		case <-e.closeCh:
+			return
+		case outerResult, isOk = <-e.outerResultChs[workerID]:
+		}
+
+		if !isOk {
+			break
+		}
+
+		// get join buffer
+		isOk, joinResult = e.getNewJoinResult(workerID)
+		if !isOk {
+			return
+		}
+		// calculate join result
+		isOk, joinResult = e.join2Chunk(workerID, outerResult, &hCtx, joinResult, selected)
+		if !isOk {
+			return
+		}
+
+		// notify outer Fetcher
+		outerResult.Reset()
+		outerResource.chk = outerResult
+		e.outerChkResourceCh <- &outerResource
+
+		if joinResult == nil {
+			return
+		}
+		// if joinResult is valid, set joinResultCh, and otherwise set joinChkResourceCh to awakw next loop
+		if joinResult.err != nil || (joinResult.chk != nil && joinResult.chk.NumRows() > 0) {
+			e.joinResultCh <- joinResult
+		} else if joinResult.chk != nil && joinResult.chk.NumRows() == 0 {
+			e.joinChkResourceCh[workerID] <- joinResult.chk
+		}
+	}
 }
 
 func (e *HashJoinExec) getNewJoinResult(workerID uint) (bool, *hashjoinWorkerResult) {

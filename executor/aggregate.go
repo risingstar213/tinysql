@@ -15,6 +15,7 @@ package executor
 
 import (
 	"context"
+	"github.com/spaolacci/murmur3"
 	"sync"
 
 	"github.com/cznic/mathutil"
@@ -353,6 +354,21 @@ func (w *HashAggPartialWorker) updatePartialResult(ctx sessionctx.Context, sc *s
 // We only support parallel execution for single-machine, so process of encode and decode can be skipped.
 func (w *HashAggPartialWorker) shuffleIntermData(sc *stmtctx.StatementContext, finalConcurrency int) {
 	// TODO: implement the method body. Shuffle the data to final workers.
+	groupKeysSlice := make([][]string, finalConcurrency)
+	for key, _ := range w.partialResultsMap {
+		hash := int(murmur3.Sum32([]byte(key))) % finalConcurrency
+		if groupKeysSlice[hash] == nil {
+			groupKeysSlice[hash] = make([]string, 0, len(w.partialResultsMap)/finalConcurrency)
+		}
+		groupKeysSlice[hash] = append(groupKeysSlice[hash], key)
+	}
+
+	for i := 0; i < finalConcurrency; i++ {
+		w.outputChs[i] <- &HashAggIntermData{
+			groupKeys:        groupKeysSlice[i],
+			partialResultMap: w.partialResultsMap,
+		}
+	}
 }
 
 // getGroupKey evaluates the group items and args of aggregate functions.
@@ -423,7 +439,37 @@ func (w *HashAggFinalWorker) getPartialInput() (input *HashAggIntermData, ok boo
 
 func (w *HashAggFinalWorker) consumeIntermData(sctx sessionctx.Context) (err error) {
 	// TODO: implement the method body. This method consumes the data given by the partial workers.
-	return nil
+	sc := sctx.GetSessionVars().StmtCtx
+	var prs [][]aggfuncs.PartialResult
+	var groupKeys []string
+	for {
+		input, ok := w.getPartialInput()
+		if !ok {
+			return nil
+		}
+		if prs == nil {
+			prs = make([][]aggfuncs.PartialResult, 0, w.maxChunkSize)
+		}
+
+		for reachEnd := false; !reachEnd; {
+			prs, groupKeys, reachEnd = input.getPartialResultBatch(sc, prs[:0], w.aggFuncs, w.maxChunkSize)
+			for _, groupKey := range groupKeys {
+				w.groupKeys = append(w.groupKeys, []byte(groupKey))
+			}
+			// alloc data for partialResultMap
+			results := w.getPartialResult(sc, w.groupKeys, w.partialResultMap)
+			for i, groupKey := range groupKeys {
+				if !w.groupSet.Exist(groupKey) {
+					w.groupSet.Insert(groupKey)
+				}
+				for j, af := range w.aggFuncs {
+					if err = af.MergePartialResult(sctx, prs[i][j], results[i][j]); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
 }
 
 func (w *HashAggFinalWorker) getFinalResult(sctx sessionctx.Context) {
