@@ -291,11 +291,21 @@ func (lr *LockResolver) getTxnStatus(bo *Backoffer, txnID uint64, primary []byte
 	// 2.2 Txn Rollbacked -- rollback itself, rollback by others, GC tomb etc.
 	// 2.3 No lock -- concurrence prewrite.
 
-	var status TxnStatus
-	var req *tikvrpc.Request
+	//var status TxnStatus
+	//var req *tikvrpc.Request
 	// build the request
 	// YOUR CODE HERE (proj6).
-	panic("YOUR CODE HERE")
+	// panic("YOUR CODE HERE")
+
+	var status TxnStatus
+	checkReq := &kvrpcpb.CheckTxnStatusRequest{
+		Context:    &kvrpcpb.Context{},
+		PrimaryKey: primary,
+		LockTs:     txnID,
+		CurrentTs:  currentTS,
+	}
+	req := tikvrpc.NewRequest(tikvrpc.CmdCheckTxnStatus, checkReq, kvrpcpb.Context{})
+
 	for {
 		loc, err := lr.store.GetRegionCache().LocateKey(bo, primary)
 		if err != nil {
@@ -319,11 +329,20 @@ func (lr *LockResolver) getTxnStatus(bo *Backoffer, txnID uint64, primary []byte
 		if resp.Resp == nil {
 			return status, errors.Trace(ErrBodyMissing)
 		}
-		_ = resp.Resp.(*kvrpcpb.CheckTxnStatusResponse)
+		checkResp := resp.Resp.(*kvrpcpb.CheckTxnStatusResponse)
 
 		// Assign status with response
 		// YOUR CODE HERE (proj6).
-		panic("YOUR CODE HERE")
+		// panic("YOUR CODE HERE")
+
+		// txnNotFoundErr???
+		status.action = checkResp.Action
+		if checkResp.LockTtl != 0 {
+			status.ttl = checkResp.LockTtl
+		} else {
+			status.commitTS = checkResp.CommitVersion
+			lr.saveResolved(txnID, status)
+		}
 		return status, nil
 	}
 
@@ -343,11 +362,21 @@ func (lr *LockResolver) resolveLock(bo *Backoffer, l *Lock, status TxnStatus, cl
 			return nil
 		}
 
-		var req *tikvrpc.Request
+		// var req *tikvrpc.Request
 
 		// build the request
 		// YOUR CODE HERE (proj6).
-		panic("YOUR CODE HERE")
+		// panic("YOUR CODE HERE")
+
+		resolveReq := &kvrpcpb.ResolveLockRequest{
+			Context:      &kvrpcpb.Context{},
+			StartVersion: l.TxnID,
+		}
+
+		if status.IsCommitted() {
+			resolveReq.CommitVersion = status.commitTS
+		}
+		req := tikvrpc.NewRequest(tikvrpc.CmdResolveLock, resolveReq)
 
 		resp, err := lr.store.SendReq(bo, req, loc.Region, readTimeoutShort)
 		if err != nil {

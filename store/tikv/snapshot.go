@@ -148,6 +148,20 @@ func (s *tikvSnapshot) get(bo *Backoffer, k kv.Key) ([]byte, error) {
 			//   2. The transaction is dead with some locks left, resolve it.
 			// YOUR CODE HERE (proj6).
 			// panic("YOUR CODE HERE")
+			lock, err1 := extractLockFromKeyErr(keyErr)
+			if err1 != nil {
+				return nil, errors.Trace(err1)
+			}
+			msBeforeExpired, _, err2 := s.store.lockResolver.ResolveLocks(bo, 0, []*Lock{lock})
+			if err2 != nil {
+				return nil, errors.Trace(err2)
+			}
+			if msBeforeExpired > 0 {
+				err = bo.BackoffWithMaxSleep(boTxnLockFast, int(msBeforeExpired), errors.New(keyErr.String()))
+				if err != nil {
+					return nil, errors.Trace(err)
+				}
+			}
 			continue
 
 		}
